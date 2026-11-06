@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/logo.png" alt="notary logo" width="140"></p>
+
 # notary
 
 Command-line tool that inspects the Spanish national eID (DNIe, `info`), signs documents producing standard CAdES-T signatures with RFC 3161 timestamps (`sign`), and verifies signatures made by itself, by a second signer, or by official tools such as AutoFirma (`verify`).
