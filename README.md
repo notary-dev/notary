@@ -1,6 +1,6 @@
 # notary
 
-Programa de línea de comandos que inspecciona el DNIe (`info`), firma documentos produciendo firmas estándar CAdES-T con sellos de tiempo RFC 3161 (`sign`) y verifica pruebas propias, de la pareja o de herramientas oficiales como AutoFirma (`verify`). Práctica A1 de Seguridad en Redes y Servicios (UNIZAR).
+Programa de línea de comandos que inspecciona el DNIe (`info`), firma documentos produciendo firmas estándar CAdES-T con sellos de tiempo RFC 3161 (`sign`) y verifica pruebas propias, de la pareja o de herramientas oficiales como AutoFirma (`verify`).
 
 > **Estado:** Los tres comandos (`info`, `sign` con DNIe o firmante software, y `verify` con validación de cadenas X.509, sello RFC 3161, evaluación temporal `--at` y consulta de revocación OCSP) están implementados, más los extras CAdES-LT (`--ltv`), varias firmas en paralelo (`cosign`) y PAdES (firma dentro de un PDF), y cubiertos por 143 pruebas unitarias.
 
