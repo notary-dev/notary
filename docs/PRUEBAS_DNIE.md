@@ -1,280 +1,282 @@
-# Guía de pruebas de `notary` con el DNIe
+# Testing `notary` with a real DNIe
 
-Pasos para probar **todo** el programa con un DNIe real, de forma limpia y en orden. Está pensada para quien parte de cero con su propia tarjeta. Al final hay una tabla para anotar los resultados.
+Steps to test **the whole program** with a real DNIe, cleanly and in order. Written for someone starting from scratch with their own card. A results table is at the end.
 
-> **Qué se prueba:** `info`, firma CAdES-T (separada y adjunta), `verify` contra las TSA reales y el OCSP del DNIe, interoperabilidad con OpenSSL / AutoFirma / VALIDe, casos que deben fallar, CAdES-LT (`--ltv`), PAdES (PDF), varias firmas (`cosign`), intercambio de pruebas con el *forger* y la firma del ZIP de entrega.
-
----
-
-## 0. Reglas del PIN (léelas antes de empezar)
-
-El DNIe se bloquea tras **3 PIN incorrectos seguidos**, y solo se desbloquea en un Punto de Actualización del DNIe (PAD), con la huella. Con este DNIe no se puede consultar cuántos intentos quedan.
-
-1. **Si un PIN falla, no lo reintentes.** Para, y comprueba el PIN en un PAD.
-2. `notary` cuenta los fallos y, tras **2 seguidos**, se niega a pedir el PIN. Es la protección funcionando, no un error.
-3. El PIN solo lo escribes tú, en tu terminal, cuando `notary` lo pide (no se ve al escribir). No lo pegues en ningún chat, fichero ni comando.
-4. Si dudas del PIN, no pruebes «a ver si es este»: ve al PAD.
-5. Cierra AutoFirma, Firefox y cualquier programa que pueda tener la tarjeta abierta antes de probar.
-
-Si ya fallaste algún intento fuera de `notary` (AutoFirma, un navegador…), díselo al programa: `notary pin-guard --set N` (con N = fallos gastados).
+> **What is tested:** `info`, CAdES-T signing (detached and attached), `verify` against the real TSAs and the DNIe OCSP, interoperability with OpenSSL / AutoFirma / VALIDe, cases that must fail, CAdES-LT (`--ltv`), PAdES (PDF), multiple signatures (`cosign`).
+>
+> Program output quoted below (`VEREDICTO`, `Introduce el PIN del DNIe`, ...) is in Spanish, as the tool prints it.
 
 ---
 
-## 1. Preparación (una sola vez)
+## 0. PIN rules (read before starting)
 
-### 1.1 Código y entorno
+The DNIe locks after **3 consecutive wrong PINs**, and can only be unlocked at an official DNIe update kiosk (PAD), with your fingerprint. With this DNIe the remaining attempts cannot be queried.
+
+1. **If a PIN fails, do not retry.** Stop and check the PIN at a PAD.
+2. `notary` counts failures and, after **2 in a row**, refuses to ask for the PIN. That is the protection working, not an error.
+3. Only you type the PIN, in your own terminal, when `notary` asks (it is not echoed). Do not paste it in any chat, file or command.
+4. If you doubt the PIN, do not try "maybe it's this one": go to the PAD.
+5. Close AutoFirma, Firefox and any program that may hold the card open before testing.
+
+If you already failed an attempt outside `notary` (AutoFirma, a browser...), tell the program: `notary pin-guard --set N` (N = failed attempts used).
+
+---
+
+## 1. Setup (once)
+
+### 1.1 Code and environment
 
 ```powershell
-cd <carpeta-del-repositorio>
+cd <repository-folder>
 git pull
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1          # si PowerShell lo bloquea: usa  .\.venv\Scripts\python.exe -m notary ...  en lugar de  notary ...
+.\.venv\Scripts\Activate.ps1          # if PowerShell blocks it: use  .\.venv\Scripts\python.exe -m notary ...  instead of  notary ...
 pip install -e .
-python -m unittest discover -s tests   # debe terminar en OK (143 pruebas), sin tocar la tarjeta
+python -m unittest discover -s tests   # must end in OK (143 tests), without touching the card
 ```
 
-### 1.2 OpenSC y lector
+### 1.2 OpenSC and reader
 
 ```powershell
 winget install --id OpenSC.OpenSC --source winget
 ```
 
-Conecta el lector y coloca el DNIe **con el chip hacia arriba, en contacto con el lector**. Si no responde, vuelve a colocarlo y limpia los contactos. Comprobación sin PIN:
+Plug in the reader and place the DNIe **chip up, touching the reader**. If it does not respond, reposition it and clean the contacts. Check without PIN:
 
 ```powershell
-& "C:\Program Files\OpenSC Project\OpenSC\tools\opensc-tool.exe" -n      # debe imprimir:  dnie
+& "C:\Program Files\OpenSC Project\OpenSC\tools\opensc-tool.exe" -n      # must print:  dnie
 ```
 
-### 1.3 Carpeta de trabajo y certificados de confianza
+### 1.3 Working folder and trust certificates
 
-**Fuera del repositorio**: las pruebas firmadas con tu DNIe contienen tu nombre y tu número de DNI y no deben acabar en git. La carpeta queda así: `firmas_propias\` (tus firmas y documentos), `intercambio\` (las pruebas que preparas y las que recibes), `trust\` y `evidencia\`.
+**Outside the repository**: signatures made with your DNIe contain your name and ID number and must not end up in git. The folder looks like this: `firmas_propias\` (your signatures and documents), `trust\` and `evidencia\`.
 
 ```powershell
-$W = "$HOME\notary-dnie"; $MIS = "$W\firmas_propias"   # $MIS: tus firmas y documentos
-New-Item -ItemType Directory -Force "$W\trust","$MIS","$W\intercambio" | Out-Null
-"Documento de prueba de la practica A1 Notary." | Set-Content "$MIS\doc.txt"
+$W = "$HOME\notary-dnie"; $MIS = "$W\firmas_propias"   # $MIS: your signatures and documents
+New-Item -ItemType Directory -Force "$W\trust","$MIS" | Out-Null
+"Test document for notary." | Set-Content "$MIS\doc.txt"
 
-# Raíz y CA intermedias del DNIe (PEM). Sirve cualquier AC DNIE 004/005/006; descarga las tres.
+# DNIe root and intermediate CAs (PEM). Any of AC DNIE 004/005/006 works; download all.
 foreach ($f in "ACRaiz2","AC004","AC005","AC006") {
   Invoke-WebRequest "http://pki.policia.es/dnie/certs/$f.crt" -OutFile "$W\trust\$f.crt" }
-# Raíz de FreeTSA y raíces públicas (DigiCert y Sectigo) para verificar los sellos de tiempo
+# FreeTSA root and public roots (DigiCert, Sectigo) to verify the timestamps
 Invoke-WebRequest "https://freetsa.org/files/cacert.pem" -OutFile "$W\trust\freetsa_root.pem"
 Copy-Item (python -c "import certifi; print(certifi.where())") "$W\trust\raices_publicas.pem"
 ```
 
-> Si `notary info` muestra una CA emisora que no es AC DNIE 004/005/006, descarga su certificado de `http://pki.policia.es/dnie/certs/` a la misma carpeta.
+> If `notary info` shows an issuing CA other than AC DNIE 004/005/006, download its certificate from `http://pki.policia.es/dnie/certs/` into the same folder.
 
-Para acortar los comandos de verificación:
+To shorten the verification commands:
 
 ```powershell
-$T = Get-ChildItem "$W\trust" | ForEach-Object FullName     # todos los certificados de confianza
+$T = Get-ChildItem "$W\trust" | ForEach-Object FullName     # all trust certificates
 ```
 
-### 1.4 Red: cable (Ethernet) o Wi-Fi
+### 1.4 Network: cable (Ethernet) or Wi-Fi
 
-Todo lo que no es DNIe Remote funciona igual por cable que por Wi-Fi. Solo hace falta salida a Internet por los puertos 80 y 443 hacia las TSA, el OCSP del DNIe y la PKI de la Policía. Compruébalo antes de empezar:
+Everything except DNIe Remote works the same over cable or Wi-Fi. You only need outbound access on ports 80 and 443 to the TSAs, the DNIe OCSP and the police PKI. Check before starting:
 
 ```powershell
 foreach ($d in @(@("freetsa.org",443), @("timestamp.digicert.com",80), @("timestamp.sectigo.com",80), @("ocsp.dnie.es",80), @("pki.policia.es",80))) {
   $ok = Test-NetConnection -ComputerName $d[0] -Port $d[1] -InformationLevel Quiet -WarningAction SilentlyContinue
-  "{0,-26} puerto {1,-4} {2}" -f $d[0], $d[1], $(if ($ok) { "OK" } else { "FALLA" })
+  "{0,-26} port {1,-4} {2}" -f $d[0], $d[1], $(if ($ok) { "OK" } else { "FAIL" })
 }
 ```
 
-**Debe salir** `OK` en las cinco líneas. Si alguna falla, esa red bloquea el puerto, algo habitual en redes de universidad o de empresa. Prueba con otra red, por ejemplo con el punto de acceso del móvil. Si solo falla FreeTSA, no es grave: `notary` pasa a la siguiente TSA (paso 6). Si falla `ocsp.dnie.es`, `verify` dará `INDETERMINATE`.
+**Expected:** `OK` on all five lines. If one fails, that network blocks the port, common on university or company networks. Try another network, for example a phone hotspot. If only FreeTSA fails it is not serious: `notary` moves on to the next TSA (step 6). If `ocsp.dnie.es` fails, `verify` gives `INDETERMINATE`.
 
-Para saber por qué adaptador sales a Internet:
+To see which adapter you reach the Internet through:
 
 ```powershell
 Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name, InterfaceDescription, LinkSpeed | Format-Table -AutoSize
 Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object InterfaceAlias, IPAddress, PrefixLength | Format-Table -AutoSize
 ```
 
-Un PC puede mostrar varios adaptadores a la vez. Los `vEthernet` (Hyper-V, WSL), los de Docker y los de VPN son virtuales. El que cuenta es el de tu cable o el de tu Wi-Fi, que lleva la IP de tu router (normalmente `192.168.x.x`).
+A PC may show several adapters at once. `vEthernet` (Hyper-V, WSL), Docker and VPN adapters are virtual. The one that counts is your cable or Wi-Fi adapter, carrying your router's subnet IP (usually `192.168.x.x`).
 
-### 1.5 Alternativa: el móvil como lector (DNIe Remote)
+### 1.5 Alternative: the phone as a reader (DNIe Remote)
 
-Si no tienes lector USB, el móvil con NFC puede hacer de lector con la aplicación **DNIeRemote** de la Policía (una parte para Windows y otra para Android). **En este proyecto no ha funcionado** para firmar: se probó en dos equipos. Lee los certificados (`notary info` los muestra), pero el paso del PIN falla: en un equipo se quedó parado y en el otro `C_Login` devolvió `Unknown error (0x000000E9)` y la app del móvil dijo «the operation cannot be successfully finished». Si lo pruebas, hazlo solo para comprobarlo y con un solo intento. Para firmar, usa el lector USB con OpenSC.
+Without a USB reader, an NFC phone can act as the reader with the police's **DNIeRemote** application (a Windows part and an Android part). **In this project it did not work** for signing: it was tried on two machines. It reads the certificates (`notary info` shows them), but the PIN step fails: on one machine it hung, on the other `C_Login` returned `Unknown error (0x000000E9)` and the phone app said "the operation cannot be successfully finished". If you try it, do so only to check, with a single attempt. For signing, use the USB reader with OpenSC.
 
-Instalación: el instalador de DNIe Remote (`Instalador_DNIeRemote_x64.exe`) se niega a instalarse («ya hay una versión más reciente») si está instalado el «Instalable DNIe» de las tarjetas con lector. Hay que desinstalar ese primero. Al terminar existe `C:\Windows\System32\DNIeRemotePKCS11.dll` y el servicio `DNIeRemoteSvc`. La app del móvil se llama DNIeSmartConnect, y no es MiDNI. Lo que sí dice el [manual oficial](https://www.dnielectronico.es/PDFs/DNIeRemote_user_manual.pdf) (v1.3.28, 2020):
+Installation: the DNIe Remote installer (`Instalador_DNIeRemote_x64.exe`) refuses to install ("a newer version is already installed") if the card-reader "Instalable DNIe" is present. Uninstall that first. Afterwards `C:\Windows\System32\DNIeRemotePKCS11.dll` and the `DNIeRemoteSvc` service exist. The phone app is called DNIeSmartConnect, not MiDNI. What the [official manual](https://www.dnielectronico.es/PDFs/DNIeRemote_user_manual.pdf) (v1.3.28, 2020) does say:
 
-- El PC y el móvil se vinculan por **USB** (con la depuración USB activada y la transferencia de archivos MTP) o por **Wi-Fi** (el móvil escanea el código QR que muestra el asistente de Windows).
-- **USB no usa la red**, así que funciona igual con el PC por cable, por Wi-Fi o sin red. Es la primera opción si el emparejamiento por Wi-Fi da problemas.
-- Con Wi-Fi, PC y móvil deben estar **en la misma red**. No basta con que los dos tengan Internet. Si el QR da «La información recuperada no es válida», el manual dice que la causa es que no lo están.
-- La comunicación va por un canal seguro y el manual dice que da igual que la red sea pública o privada. Aun así, si el emparejamiento por Wi-Fi tarda más de 10 segundos, el manual apunta al **cortafuegos de Windows** y pide comprobar que existe una regla para DNIeRemote.
-- El módulo PKCS#11 es `DNIeRemotePKCS11.dll`, en `C:\Windows\System32\`. Si es el único módulo instalado, `notary` lo usa solo. Si tienes también OpenSC, indícalo: `--module "C:\Windows\System32\DNIeRemotePKCS11.dll"`.
-- **No es 100 % compatible con AutoFirma.** El manual dice que solo se puede firmar directamente desde el almacén de Mozilla Firefox, y que AutoFirma necesita la opción `-store mozilla` por línea de comandos. Esto afecta solo a *firmar con AutoFirma*. Para **verificar** en AutoFirma o VALIDe no hace falta ningún lector.
+- PC and phone pair over **USB** (with USB debugging enabled and MTP file transfer) or over **Wi-Fi** (the phone scans the QR code the Windows wizard shows).
+- **USB does not use the network**, so it works the same with the PC on cable, on Wi-Fi or offline. It is the first option if Wi-Fi pairing gives trouble.
+- With Wi-Fi, PC and phone must be **on the same network**. Both having Internet is not enough. If the QR gives "La información recuperada no es válida", the manual says the cause is that they are not.
+- Communication goes over a secure channel and the manual says it does not matter whether the network is public or private. Still, if Wi-Fi pairing takes more than 10 seconds, the manual points to the **Windows firewall** and asks you to check that a rule exists for DNIeRemote.
+- The PKCS#11 module is `DNIeRemotePKCS11.dll`, in `C:\Windows\System32\`. If it is the only module installed, `notary` uses it automatically. If you also have OpenSC, say so: `--module "C:\Windows\System32\DNIeRemotePKCS11.dll"`.
+- **It is not 100 % compatible with AutoFirma.** The manual says you can only sign directly from the Mozilla Firefox store, and that AutoFirma needs the `-store mozilla` command-line option. This affects only *signing with AutoFirma*. To **verify** in AutoFirma or VALIDe no reader is needed.
 
-**Si `notary sign` se queda parado en «Conectando con el DNIe y verificando PIN...».** Le pasó a la pareja con el PC por cable y el móvil por Wi-Fi, en la misma red. El programa llegó a leer los certificados a través del móvil, así que la vinculación y la red funcionaban, y la llamada `C_Login` del módulo no volvió hasta que se cortó con Ctrl+C. Por tanto el problema está en el paso del PIN y no en la red. Antes de cortar, mira:
+**If `notary sign` hangs at "Conectando con el DNIe y verificando PIN...".** This happened with the PC on cable and the phone on Wi-Fi, same network. The program managed to read the certificates through the phone, so pairing and network worked, and the module's `C_Login` call did not return until stopped with Ctrl+C. So the problem is in the PIN step, not in the network. Before cutting, look for:
 
-- Si hay una **ventana** de DNIe Remote pidiendo el PIN, quizá detrás de otras, o una **petición en el móvil**.
-- Qué dice `notary info` en `PROTECTED_AUTHENTICATION_PATH`. Si está `ACTIVO`, el módulo espera el PIN fuera del terminal y `notary` ya no lo pide por consola: se lo pasa al módulo como indica el estándar PKCS#11 y te avisa de que lo escribas en la ventana, el teclado del lector o el móvil. **No lo hemos podido probar con DNIe Remote.**
-- Si cortas con Ctrl+C durante ese paso, `notary` lo **cuenta como un intento de PIN**, porque no sabe si el PIN llegó a la tarjeta. Si cortaste con una versión anterior del programa, ese intento no se contó: ajusta el contador con `notary pin-guard --set N` y, si dudas, comprueba el PIN en un PAD antes de seguir.
+- A DNIe Remote **window** asking for the PIN, perhaps behind others, or a **request on the phone**.
+- What `notary info` says for `PROTECTED_AUTHENTICATION_PATH`. If it is `ACTIVO`, the module expects the PIN outside the terminal and `notary` no longer asks for it on the console: it passes control to the module as the PKCS#11 standard requires and tells you to type it in the window, the reader keypad or the phone. **We could not test this with DNIe Remote.**
+- If you cut with Ctrl+C during that step, `notary` **counts it as a PIN attempt**, because it does not know whether the PIN reached the card. If you cut with an earlier version of the program, that attempt was not counted: adjust the counter with `notary pin-guard --set N` and, if in doubt, check the PIN at a PAD before continuing.
 
-Para problemas de **emparejamiento**, el manual asocia cada mensaje a una causa:
+For **pairing** problems, the manual ties each message to a cause:
 
-- «La información recuperada no es válida» al escanear el QR apunta a que PC y móvil no están en la misma red.
-- Un emparejamiento por Wi-Fi que tarda más de 10 segundos apunta al cortafuegos de Windows.
-- «Error de comunicación. Se ha perdido la conexión con el DNIe» al acercar el DNI al móvil apunta al NFC. El manual dice que es muy frágil, de muy corto alcance y que hay que colocar el DNI justo sobre la antena del móvil, sin moverlo.
+- "La información recuperada no es válida" when scanning the QR points to PC and phone not being on the same network.
+- Wi-Fi pairing taking more than 10 seconds points to the Windows firewall.
+- "Error de comunicación. Se ha perdido la conexión con el DNIe" when bringing the DNI to the phone points to NFC. The manual says it is very fragile, very short range, and the DNI must sit right over the phone's antenna without moving.
 
-**Para separar la red del resto, vincula por USB**, que no usa la red. Con la red como sospechosa, comprueba que el router no aísle a los clientes ni use una red de invitados, y compara la IPv4 del PC con la del móvil (Ajustes, Wi-Fi, tu red). Con máscara `/24`, que es lo habitual, coinciden los tres primeros números (por ejemplo `192.168.1.x`).
+**To separate the network from everything else, pair over USB**, which does not use the network. If the network is the suspect, check that the router does not isolate clients or use a guest network, and compare the PC's IPv4 with the phone's (Settings, Wi-Fi, your network). With a `/24` mask, the usual one, the first three numbers match (for example `192.168.1.x`).
 
-**PC con adaptadores virtuales.** *Esto es una hipótesis nuestra y no aparece en el manual.* Si DNIeRemote anunciara la IP de un adaptador virtual (Hyper-V, WSL, VPN), el móvil no podría alcanzar el PC. Si el emparejamiento falla y tu PC tiene varios adaptadores, desactiva los virtuales y las VPN mientras vinculas, o usa USB.
+**PC with virtual adapters.** *This is our hypothesis and is not in the manual.* If DNIeRemote advertised the IP of a virtual adapter (Hyper-V, WSL, VPN), the phone could not reach the PC. If pairing fails and your PC has several adapters, disable the virtual ones and VPNs while pairing, or use USB.
 
-**Cortafuegos.** Para ver si existe la regla de DNIeRemote y a qué tipo de red se aplica, y qué tipo de red tienes:
+**Firewall.** To see whether the DNIeRemote rule exists and which network type it applies to, and which type of network you have:
 
 ```powershell
 Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like '*DNIeRemote*' } | Get-NetFirewallRule | Format-Table DisplayName, Enabled, Direction, Action, Profile -AutoSize
 Get-NetConnectionProfile | Format-Table Name, InterfaceAlias, NetworkCategory -AutoSize
 ```
 
-Si la regla solo cubre el perfil `Private` y tu red es `Public`, el cortafuegos bloquea la conexión. Tienes tres salidas: vincular por USB, pasar esa red a Privada (relaja el cortafuegos de esa red) o ampliar el perfil de la regla. Esa decisión es tuya, y por eso `notary` no la toma por ti.
+If the rule only covers the `Private` profile and your network is `Public`, the firewall blocks the connection. You have three ways out: pair over USB, switch that network to Private (relaxes the firewall for that network) or widen the rule's profile. That decision is yours, which is why `notary` does not take it for you.
 
-Para comprobar o arrancar los servicios de Windows (`SCardSvr` y `DNIeRemoteSvc`) como administrador se puede ejecutar `Start-Service SCardSvr, DNIeRemoteSvc` y consultar `Get-Service SCardSvr, DNIeRemoteSvc`. El manual oficial no menciona ningún servicio llamado `DNIeRemoteSvc`, aunque el instalador de DNIe Remote lo registra en Windows.
+To check or start the Windows services (`SCardSvr` and `DNIeRemoteSvc`) as administrator, run `Start-Service SCardSvr, DNIeRemoteSvc` and query `Get-Service SCardSvr, DNIeRemoteSvc`. The official manual does not mention any service called `DNIeRemoteSvc`, although the DNIe Remote installer registers it in Windows.
 
-Con el móvil, el contador de PIN de `notary` puede quedarse corto. Solo cuenta el error `CKR_PIN_INCORRECT`, y no sabemos qué código devuelve DNIe Remote con un PIN erróneo. Si un intento falla con otro error, mira `notary pin-guard` y trátalo como un intento gastado.
+With the phone, `notary`'s PIN counter may fall short. It only counts the `CKR_PIN_INCORRECT` error, and we do not know what code DNIe Remote returns for a wrong PIN. If an attempt fails with another error, check `notary pin-guard` and treat it as a spent attempt.
 
 ---
 
-## 2. Reconocer la tarjeta (no pide PIN)
+## 2. Recognise the card (no PIN)
 
 ```powershell
 notary info
 notary pin-guard
 ```
 
-**Debe salir:** un token «DNI electrónico», los certificados `CertAutenticacion` (uso `digital_signature`) y `CertFirmaDigital` (uso `non_repudiation`) con su emisor (`AC DNIE 00X`) y su validez, y `USER_PIN_LOCKED` / `USER_PIN_FINAL_TRY` inactivos. `pin-guard` debe decir `0 de 3`.
+**Expected:** a "DNI electrónico" token, the `CertAutenticacion` (usage `digital_signature`) and `CertFirmaDigital` (usage `non_repudiation`) certificates with their issuer (`AC DNIE 00X`) and validity, and `USER_PIN_LOCKED` / `USER_PIN_FINAL_TRY` inactive. `pin-guard` must say `0 de 3`.
 
-> **Comprueba que los certificados no estén caducados.** Si lo están, hay que renovarlos en un PAD antes de seguir.
+> **Check the certificates are not expired.** If they are, renew them at a PAD before continuing.
 
 ---
 
-## 3. Firma básica CAdES-T con el DNIe
+## 3. Basic CAdES-T signature with the DNIe
 
 ```powershell
 notary sign "$MIS\doc.txt"
 ```
 
-Te pide `Introduce el PIN del DNIe:` (una sola vez). Puede abrirse una ventana de OpenSC que pide confirmar la firma: acéptala. Hace la firma en la tarjeta, pide el sello de tiempo a FreeTSA y escribe `doc.txt.csig`.
+It asks `Introduce el PIN del DNIe:` (once). An OpenSC window asking you to confirm the signature may open: accept it. It signs on the card, requests the timestamp from FreeTSA and writes `doc.txt.csig`.
 
-**Debe salir:** los pasos `[1]` a `[6]`, `sellado por https://freetsa.org/tsr`, `Resultado ... CAdES-T` y `Escrito ... doc.txt.csig`.
+**Expected:** steps `[1]` to `[6]`, `sellado por https://freetsa.org/tsr`, `Resultado ... CAdES-T` and `Escrito ... doc.txt.csig`.
 
-## 4. Verificar tu propia firma
+## 4. Verify your own signature
 
 ```powershell
 notary verify "$MIS\doc.txt.csig" --content "$MIS\doc.txt" --trust $T
 ```
 
-**Debe salir** `VEREDICTO: VALID — firmado por <tu nombre> (FIRMA), no más tarde de <hora UTC>`, con:
+**Expected:** `VEREDICTO: VALID — firmado por <your name> (FIRMA), no más tarde de <UTC time>`, with:
 
-- `[4]` firma RSA PKCS#1 v1.5 / SHA256;
-- `[5]` cadena `... (FIRMA) -> AC DNIE 00X -> AC RAIZ DNIE 2`;
-- `[6]` el sello de FreeTSA y su cadena;
+- `[4]` RSA PKCS#1 v1.5 / SHA256 signature;
+- `[5]` chain `... (FIRMA) -> AC DNIE 00X -> AC RAIZ DNIE 2`;
+- `[6]` the FreeTSA stamp and its chain;
 - `[8]` OCSP `GOOD (http://ocsp.dnie.es)`.
 
-> El OCSP del DNIe responde por HTTP (no por HTTPS) y devuelve el nonce; la respuesta es válida durante una hora.
+> The DNIe OCSP answers over HTTP (not HTTPS) and returns the nonce; the response is valid for one hour.
 
-## 5. Firma adjunta (attached)
+## 5. Attached signature
 
 ```powershell
 notary sign "$MIS\doc.txt" --format attached --out "$MIS\doc_attached.csig"
 notary verify "$MIS\doc_attached.csig" --trust $T
 ```
 
-Sin `--content`, porque el documento va dentro. **Debe salir** `VALID`.
+No `--content`, because the document is inside. **Expected:** `VALID`.
 
-## 6. Varias TSA: si la primera falla, usa la siguiente
+## 6. Several TSAs: if the first fails, use the next
 
 ```powershell
 notary sign "$MIS\doc.txt" --tsa http://tsa-que-no-existe.invalid https://freetsa.org/tsr --out "$MIS\doc_tsa2.csig"
 ```
 
-**Debe salir:** `fallo (...)` para la primera y `sellado por https://freetsa.org/tsr`. Opcional: repite con `http://timestamp.digicert.com` y `http://timestamp.sectigo.com`, y verifica cada uno (cada TSA rellena el token de forma distinta).
+**Expected:** `fallo (...)` for the first and `sellado por https://freetsa.org/tsr`. Optional: repeat with `http://timestamp.digicert.com` and `http://timestamp.sectigo.com`, and verify each (each TSA fills the token differently).
 
 ---
 
-## 7. Interoperabilidad con herramientas oficiales
+## 7. Interoperability with official tools
 
-### 7.1 OpenSSL (a mano)
+### 7.1 OpenSSL (by hand)
 
 ```powershell
 openssl cms -verify -binary -inform DER -in "$MIS\doc.txt.csig" -content "$MIS\doc.txt" -noverify -out "$MIS\verificado.bin"
 ```
 
-**Debe salir:** `CMS Verification successful`. (`-noverify` omite la cadena; lo que se comprueba aquí es la firma.) Windows PowerShell 5.1 muestra ese mensaje con aspecto de error rojo porque OpenSSL lo escribe por el canal de errores; si dice `successful`, ha ido bien. Si tu OpenSSL no está en el PATH, usa el de Git: `C:\Program Files\Git\usr\bin\openssl.exe`.
+**Expected:** `CMS Verification successful`. (`-noverify` skips the chain; what is checked here is the signature.) Windows PowerShell 5.1 shows that message looking like a red error because OpenSSL writes it to the error stream; if it says `successful`, it worked. If your OpenSSL is not in the PATH, use Git's: `C:\Program Files\Git\usr\bin\openssl.exe`.
 
-### 7.2 AutoFirma y VALIDe
+### 7.2 AutoFirma and VALIDe
 
-- **AutoFirma:** *Verificar firma* → elige `doc.txt.csig` y, si lo pide, `doc.txt`. Debe dar firma válida.
-- **VALIDe** (`https://valide.redsara.es`): *Validar firma* → sube la firma y el documento.
-- **Haz una captura de cada una**:.
+- **AutoFirma:** *Verificar firma* → pick `doc.txt.csig` and, if asked, `doc.txt`. It must report a valid signature.
+- **VALIDe** (`https://valide.redsara.es`): *Validar firma* → upload the signature and the document.
+- Take a screenshot of each.
 
 ---
 
-## 8. Casos que deben fallar
+## 8. Cases that must fail
 
-Todos sobre la misma firma. Ninguno usa la tarjeta.
+All on the same signature. None uses the card.
 
 ```powershell
-# 8.1 Documento modificado  ->  INVALID (el resumen no coincide)
+# 8.1 Modified document  ->  INVALID (digest does not match)
 "otro contenido" | Set-Content "$MIS\otro.txt"
 notary verify "$MIS\doc.txt.csig" --content "$MIS\otro.txt" --trust $T
 
-# 8.2 Sin certificados de confianza  ->  INDETERMINATE (no se puede validar la cadena)
+# 8.2 No trust certificates  ->  INDETERMINATE (the chain cannot be validated)
 notary verify "$MIS\doc.txt.csig" --content "$MIS\doc.txt"
 
-# 8.3 Evaluada antes de que existiera tu certificado (ponlo a una fecha anterior a su "Válido desde")  ->  INVALID
+# 8.3 Evaluated before your certificate existed (set a date before its "Valid from")  ->  INVALID
 notary verify "$MIS\doc.txt.csig" --content "$MIS\doc.txt" --trust $T --at 2020-01-01T00:00:00Z
 
-# 8.4 Archivo truncado  ->  INVALID, sin excepciones
+# 8.4 Truncated file  ->  INVALID, no exceptions
 $b = [IO.File]::ReadAllBytes("$MIS\doc.txt.csig"); [IO.File]::WriteAllBytes("$MIS\truncada.csig", $b[0..($b.Length-41)])
 notary verify "$MIS\truncada.csig" --content "$MIS\doc.txt" --trust $T
 
-# 8.5 Firma separada sin indicar el documento  ->  INVALID (pide --content)
+# 8.5 Detached signature without giving the document  ->  INVALID (asks for --content)
 notary verify "$MIS\doc.txt.csig" --trust $T
 ```
 
-Códigos de salida: `0` = VALID, `1` = INVALID, `2` = INDETERMINATE (`$LASTEXITCODE`).
+Exit codes: `0` = VALID, `1` = INVALID, `2` = INDETERMINATE (`$LASTEXITCODE`).
 
 ---
 
-## 9. CAdES-LT: evidencia dentro de la firma (`--ltv`)
+## 9. CAdES-LT: evidence inside the signature (`--ltv`)
 
 ```powershell
 notary sign "$MIS\doc.txt" --ltv --out "$MIS\doc_ltv.csig"
 ```
 
-Descarga la CA emisora de la AIA de tu certificado, pide una respuesta OCSP y las incrusta tras el sello. **Debe salir** `Resultado ... CAdES-LT`. Si no puede reunir la evidencia (por ejemplo, sin red), falla con un mensaje `[!]` y **no escribe ningún fichero**. Este es el paso que más depende del DNIe real: si falla, pega la salida completa.
+It downloads the issuing CA from your certificate's AIA, requests an OCSP response and embeds both after the stamp. **Expected:** `Resultado ... CAdES-LT`. If it cannot gather the evidence (for example, no network), it fails with a `[!]` message and **writes no file**. This is the step that depends most on the real DNIe: if it fails, keep the full output.
 
-Después, **desconecta toda la red** y verifica. Si tu PC tiene cable y Wi-Fi a la vez, hay que cortar los dos: desenchufa el cable y apaga el Wi-Fi (en un portátil, el modo avión lo hace todo). Comprueba que de verdad estás sin red, porque con una conexión que sigue activa la prueba no demuestra nada:
+Then, **disconnect all networks** and verify. If your PC has both cable and Wi-Fi, cut both: unplug the cable and turn off Wi-Fi (on a laptop, airplane mode does it all). Check you really are offline, because with a connection still active the test proves nothing:
 
 ```powershell
-Test-NetConnection ocsp.dnie.es -Port 80 -InformationLevel Quiet -WarningAction SilentlyContinue     # debe dar False
+Test-NetConnection ocsp.dnie.es -Port 80 -InformationLevel Quiet -WarningAction SilentlyContinue     # must give False
 notary verify "$MIS\doc_ltv.csig" --content "$MIS\doc.txt" --trust $T
 ```
 
-Con permisos de administrador también puedes usar `Disable-NetAdapter -Name "Wi-Fi" -Confirm:$false` y volver con `Enable-NetAdapter -Name "Wi-Fi"` (el nombre del adaptador sale de `Get-NetAdapter`).
+With administrator rights you can also use `Disable-NetAdapter -Name "Wi-Fi" -Confirm:$false` and go back with `Enable-NetAdapter -Name "Wi-Fi"` (the adapter name comes from `Get-NetAdapter`).
 
-**Debe salir** `VALID` con `[8] ... GOOD (incrustada en la firma, LTV; verificada sin red)`. Vuelve a conectar la red cuando termines.
+**Expected:** `VALID` with `[8] ... GOOD (incrustada en la firma, LTV; verificada sin red)`. Reconnect when done.
 
-> Comprobación de contraste: `doc.txt.csig` (sin `--ltv`) verificado **sin red** debe dar `INDETERMINATE`, porque no puede consultar el OCSP.
+> Control check: `doc.txt.csig` (without `--ltv`) verified **offline** must give `INDETERMINATE`, because it cannot query OCSP.
 
 ---
 
-## 10. PAdES: firmar dentro de un PDF
+## 10. PAdES: signing inside a PDF
 
-Usa cualquier PDF (`$MIS\ejemplo.pdf`).
+Use any PDF (`$MIS\ejemplo.pdf`).
 
 ```powershell
-notary sign "$MIS\ejemplo.pdf" --format pades          # escribe ejemplo.signed.pdf
+notary sign "$MIS\ejemplo.pdf" --format pades          # writes ejemplo.signed.pdf
 notary verify "$MIS\ejemplo.signed.pdf" --trust $T
 ```
 
-**Debe salir** `[1] Formato ... PAdES (ETSI.CAdES.detached)` y `VALID`. Abre `ejemplo.signed.pdf` en un lector de PDF (Adobe Acrobat, AutoFirma o VALIDe) y mira el panel de firmas. **Captura de pantalla.**
+**Expected:** `[1] Formato ... PAdES (ETSI.CAdES.detached)` and `VALID`. Open `ejemplo.signed.pdf` in a PDF reader (Adobe Acrobat, AutoFirma or VALIDe) and look at the signatures panel. Take a screenshot.
 
-> La firma es invisible (no se dibuja sobre la página): se ve en el panel de firmas del lector. Si Acrobat dice que la identidad no es de confianza, es normal: no tiene la raíz del DNIe instalada.
+> The signature is invisible (not drawn on the page): it shows in the reader's signatures panel. If Acrobat says the identity is not trusted, that is normal: it does not have the DNIe root installed.
 
-Prueba negativa: añade texto al final del PDF firmado y verifica; **debe dar** `INVALID` (`bytes añadidos después de la última firma`).
+Negative test: append text to the end of the signed PDF and verify; **expected** `INVALID` (`bytes añadidos después de la última firma`).
 
 ```powershell
 Add-Content "$MIS\ejemplo.signed.pdf" "contenido anadido"
@@ -283,58 +285,57 @@ notary verify "$MIS\ejemplo.signed.pdf" --trust $T
 
 ---
 
-## 11. Varias firmas (`cosign`)
+## 11. Multiple signatures (`cosign`)
 
-Necesita **dos firmantes**: el DNIe de cada miembro de la pareja (o, para probar solo, el firmante software). Sirve para comprobar que `verify` muestra todos.
+You need **two signers**: two people's DNIe (or, to test alone, the software signer). It checks that `verify` shows all of them.
 
 ```powershell
-# El miembro A firma como en el paso 3 (doc.txt.csig). El miembro B añade su firma con SU DNIe y SU PIN:
+# Signer A signs as in step 3 (doc.txt.csig). Signer B adds their signature with THEIR DNIe and THEIR PIN:
 notary cosign "$MIS\doc.txt.csig" "$MIS\doc.txt" --out "$MIS\doc_dos_firmas.csig"
 notary verify "$MIS\doc_dos_firmas.csig" --content "$MIS\doc.txt" --trust $T
 ```
 
-**Debe salir:** `=== Firmante 1 de 2 ===`, `=== Firmante 2 de 2 ===` y `VEREDICTO FINAL: VALID (2 firmantes; ...)`. La firma original no se modifica.
+**Expected:** `=== Firmante 1 de 2 ===`, `=== Firmante 2 de 2 ===` and `VEREDICTO FINAL: VALID (2 firmantes; ...)`. The original signature is not modified.
 
-Para un PDF, basta con volver a firmar el PDF ya firmado (paso 10) con el otro DNIe.
+For a PDF, just sign the already signed PDF again (step 10) with the other DNIe.
 
 ---
 
-## Tabla de resultados
+## Results table
 
-| # | Prueba | Resultado esperado | ¿OK? | Notas |
+| # | Test | Expected result | OK? | Notes |
 | --- | --- | --- | --- | --- |
-| 1.4 | Diagnóstico de red (cable o Wi-Fi) | `OK` en las cinco líneas | ☐ | |
-| 2 | `notary info` y `pin-guard` | tarjeta y certificados vigentes; `0 de 3` | ☐ | |
-| 3 | `sign` detached | `CAdES-T`, sellado por FreeTSA | ☐ | |
-| 4 | `verify` propia | `VALID`, OCSP `GOOD` | ☐ | |
+| 1.4 | Network diagnostic (cable or Wi-Fi) | `OK` on all five lines | ☐ | |
+| 2 | `notary info` and `pin-guard` | card and valid certificates; `0 de 3` | ☐ | |
+| 3 | `sign` detached | `CAdES-T`, stamped by FreeTSA | ☐ | |
+| 4 | `verify` own signature | `VALID`, OCSP `GOOD` | ☐ | |
 | 5 | `sign` + `verify` attached | `VALID` | ☐ | |
-| 6 | Cambio de TSA | falla la 1.ª, sella la 2.ª | ☐ | |
+| 6 | TSA fallback | 1st fails, 2nd stamps | ☐ | |
 | 7.1 | OpenSSL | `CMS Verification successful` | ☐ | |
-| 7.2 | AutoFirma / VALIDe | firma válida (captura) | ☐ | |
-| 8.1–8.5 | Casos negativos | INVALID / INDETERMINATE según el caso | ☐ | |
-| 9 | `--ltv` y verificación sin red | `VALID`, «incrustada en la firma» | ☐ | |
-| 10 | PAdES | `VALID` y visible en el lector (captura) | ☐ | |
+| 7.2 | AutoFirma / VALIDe | valid signature (screenshot) | ☐ | |
+| 8.1–8.5 | Negative cases | INVALID / INDETERMINATE as appropriate | ☐ | |
+| 9 | `--ltv` and offline verification | `VALID`, "incrustada en la firma" | ☐ | |
+| 10 | PAdES | `VALID` and visible in the reader (screenshot) | ☐ | |
 | 11 | `cosign` | `VEREDICTO FINAL: VALID (2 firmantes)` | ☐ | |
-| 13.2 | ZIP firmado por ambos | `VALID` | ☐ | |
 
 ---
 
-## Si algo falla
+## If something fails
 
-| Síntoma | Qué hacer |
+| Symptom | What to do |
 | --- | --- |
-| `No se han encontrado módulos PKCS#11` | Instala OpenSC (1.2), o DNIe Remote (1.5), o indica el módulo con `--module "C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"`. |
-| `ninguno detecta un token presente`, `CKR_DEVICE_ERROR`, `Unresponsive card` | Recoloca el DNIe con el chip hacia arriba, limpia los contactos y cierra AutoFirma/Firefox. Comprueba con `opensc-tool -n` (debe decir `dnie`). |
-| `notary se niega a pedir el PIN` / `Se han registrado N PIN incorrectos` | Es la protección. **No la saltes:** comprueba el PIN en un PAD y luego `notary pin-guard --reset`. |
-| `CKR_PIN_INCORRECT` | **Para.** No reintentes. Revisa el PIN en un PAD. |
-| `INDETERMINATE ... no se encuentra el certificado emisor` | Falta una CA en `--trust`: añade `AC DNIE 00X`, `ACRaiz2` o la raíz de la TSA. |
-| `INDETERMINATE` por OCSP | Sin red, o el servidor no responde. Reintenta más tarde. |
-| El diagnóstico de red (1.4) da `FALLA` en un puerto | Esa red lo bloquea (universidad, empresa, eduroam). Usa otra red, por ejemplo el punto de acceso del móvil. |
-| DNIe Remote: «La información recuperada no es válida» al escanear el QR | El manual lo asocia a que PC y móvil no estén en la misma red (1.5). Compara sus IPv4, desactiva VPN y adaptadores virtuales, o vincula por USB. |
-| DNIe Remote: `sign` se queda parado en «verificando PIN» | Mira si hay una ventana o una petición en el móvil esperando el PIN, y qué dice `PROTECTED_AUTHENTICATION_PATH` en `notary info` (1.5). Ctrl+C cuenta como un intento de PIN. |
-| DNIe Remote: el emparejamiento por Wi-Fi tarda más de 10 s | Probable cortafuegos (1.5): mira la regla de DNIeRemote y el tipo de red, o vincula por USB. |
-| `respuesta OCSP caducada` | El reloj del equipo está desajustado. |
-| `INVALID ... caducado` | El certificado del DNIe ha caducado: renuévalo en un PAD. |
-| La ventana de confirmación de OpenSC no aparece | Mira si quedó detrás de otra ventana; sin aceptarla no se firma. |
+| `No se han encontrado módulos PKCS#11` | Install OpenSC (1.2), or DNIe Remote (1.5), or give the module with `--module "C:\Program Files\OpenSC Project\OpenSC\pkcs11\opensc-pkcs11.dll"`. |
+| `ninguno detecta un token presente`, `CKR_DEVICE_ERROR`, `Unresponsive card` | Reposition the DNIe chip up, clean the contacts and close AutoFirma/Firefox. Check with `opensc-tool -n` (must say `dnie`). |
+| `notary se niega a pedir el PIN` / `Se han registrado N PIN incorrectos` | It is the protection. **Do not bypass it:** check the PIN at a PAD and then `notary pin-guard --reset`. |
+| `CKR_PIN_INCORRECT` | **Stop.** Do not retry. Check the PIN at a PAD. |
+| `INDETERMINATE ... no se encuentra el certificado emisor` | A CA is missing from `--trust`: add `AC DNIE 00X`, `ACRaiz2` or the TSA root. |
+| `INDETERMINATE` because of OCSP | No network, or the server does not answer. Retry later. |
+| The network diagnostic (1.4) shows `FAIL` on a port | That network blocks it (university, company, eduroam). Use another network, for example a phone hotspot. |
+| DNIe Remote: "La información recuperada no es válida" when scanning the QR | The manual ties it to PC and phone not being on the same network (1.5). Compare their IPv4s, disable VPNs and virtual adapters, or pair over USB. |
+| DNIe Remote: `sign` hangs at "verificando PIN" | Look for a window or a phone request waiting for the PIN, and what `PROTECTED_AUTHENTICATION_PATH` says in `notary info` (1.5). Ctrl+C counts as a PIN attempt. |
+| DNIe Remote: Wi-Fi pairing takes more than 10 s | Probably the firewall (1.5): check the DNIeRemote rule and the network type, or pair over USB. |
+| `respuesta OCSP caducada` | The computer clock is off. |
+| `INVALID ... caducado` | The DNIe certificate has expired: renew it at a PAD. |
+| The OpenSC confirmation window does not appear | Check whether it ended up behind another window; without accepting it nothing is signed. |
 
-**Si necesitas ayuda,** copia la salida completa del comando (no el PIN: no aparece en ninguna salida). Antes de pegarla en un chat o enviarla, **tapa tu nombre y número de DNI**, que salen en `info` y `verify`.
+**If you need help,** copy the command's full output (not the PIN: it never appears in any output). Before pasting it in a chat or sending it, **cover your name and ID number**, which show up in `info` and `verify`.

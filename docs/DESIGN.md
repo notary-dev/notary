@@ -1,176 +1,177 @@
-# Documento de Diseño — `notary`
+# Design document — `notary`
 
-**Autores:** Nacho Pola · Martín Longares
+**Authors:** Nacho Pola · Martín Longares Gil
 
----
-
-## 1. Arquitectura y Formatos
-
-### 1.1 Estructura modular del programa
-El paquete `notary` separa el acceso al hardware criptográfico, la construcción ASN.1/CMS, la comunicación en red (TSA y OCSP) y el motor de verificación:
-
-- **Interfaz de firmante (`notary/signer/`):**
-  - `Signer` (`base.py`): interfaz abstracta con `get_certificate() -> asn1crypto.x509.Certificate` y `sign_hash(digest: bytes) -> bytes`.
-  - `SoftwareSigner` (`software_signer.py`): carga una clave privada RSA y un certificado PEM locales, comprueba que sus claves públicas coinciden y firma resúmenes SHA-256 de 32 bytes.
-  - `PKCS11Signer` (`pkcs11_signer.py`): localiza el módulo PKCS#11, comprueba los flags de seguridad del PIN (`CKF_USER_PIN_LOCKED` y `CKF_USER_PIN_FINAL_TRY`), selecciona en sesión pública el certificado de firma (`CertFirmaDigital`), solicita el PIN con `getpass` sin reintentos automáticos y envía la estructura `DigestInfo` (51 bytes) a la tarjeta mediante `CKM_RSA_PKCS`.
-- **Constructor CAdES (`notary/cades/builder.py`):**
-  - Construye un contenedor CMS `ContentInfo` (`1.2.840.113549.1.7.2`, `signedData`) codificado en DER.
-  - Soporta modo `detached` (`encapContentInfo.eContent = None`, el documento viaja aparte) y modo `attached` (`encapContentInfo.eContent = OctetString(content)`).
-  - Incluye en `signedAttrs` los cuatro atributos obligatorios (`contentType`, `messageDigest`, `signingTime`, `signingCertificateV2`) y, en CAdES-T, añade el token RFC 3161 en `unsignedAttrs` (`signatureTimeStampToken`, OID `1.2.840.113549.1.9.16.2.14`).
-- **Cliente TSA RFC 3161 (`notary/tsa.py`):**
-  - Calcula `SHA-256(signatureValue)`, genera un `nonce` aleatorio criptográfico, solicita `certReq = True` y recorre las TSAs configuradas por orden hasta obtener una respuesta `granted` cuyo `messageImprint` y `nonce` coincidan.
-- **Evidencia LTV y varias firmas (`notary/cades/ltv.py`, `notary/evidence.py`, `add_parallel_signature` en `builder.py`):**
-  - `sign --ltv` añade, tras el sello de tiempo, dos atributos no firmados de ETSI EN 319 122-1: `certificateValues` (cadena del firmante, `1.2.840.113549.1.9.16.2.23`) y `revocationValues` con la respuesta OCSP (`...2.24`). El resultado es CAdES-LT. La cadena se toma de `--chain` o se descarga de la AIA (`caIssuers`) del certificado, y la respuesta OCSP se valida antes de incrustarla: si no se puede reunir la evidencia, `sign` falla y no escribe nada.
-  - `cosign` añade un segundo `SignerInfo` en paralelo a un `.csig` existente: cada firmante firma el documento por su cuenta y lleva su propio sello. Las firmas anteriores se conservan byte a byte.
-- **Verificador y cliente OCSP (`notary/verify.py`, `notary/ocsp.py`):**
-  - Desmonta el `.csig`, valida la integridad del documento, los atributos firmados, la firma matemática, la cadena del firmante hasta `--trust`, el sello de tiempo RFC 3161 (imprint, firma CMS de la TSA, `ExtendedKeyUsage = timeStamping` y cadena de la TSA hasta `--trust`), la vigencia temporal en la hora de la TSA (o `--at`) y el estado de revocación por OCSP.
+> The CLI output and the source comments are in Spanish; this document describes them in English.
 
 ---
 
-## 2. Respuestas a las Preguntas de Diseño (Sección 5.3 del Guion)
+## 1. Architecture and formats
 
-### Pregunta 1: Los dos certificados del DNIe
+### 1.1 Module structure
+The `notary` package separates access to the cryptographic hardware, ASN.1/CMS construction, network communication (TSA and OCSP) and the verification engine:
+
+- **Signer interface (`notary/signer/`):**
+  - `Signer` (`base.py`): abstract interface with `get_certificate() -> asn1crypto.x509.Certificate` and `sign_hash(digest: bytes) -> bytes`.
+  - `SoftwareSigner` (`software_signer.py`): loads a local RSA private key and PEM certificate, checks that their public keys match, and signs 32-byte SHA-256 digests.
+  - `PKCS11Signer` (`pkcs11_signer.py`): locates the PKCS#11 module, checks the PIN security flags (`CKF_USER_PIN_LOCKED`, `CKF_USER_PIN_FINAL_TRY`), selects the signing certificate (`CertFirmaDigital`) in a public session, reads the PIN with `getpass` without automatic retries, and sends the `DigestInfo` structure (51 bytes) to the card using `CKM_RSA_PKCS`.
+- **CAdES builder (`notary/cades/builder.py`):**
+  - Builds a DER-encoded CMS `ContentInfo` (`1.2.840.113549.1.7.2`, `signedData`).
+  - Supports `detached` mode (`encapContentInfo.eContent = None`, the document travels separately) and `attached` mode (`encapContentInfo.eContent = OctetString(content)`).
+  - Puts the four mandatory attributes in `signedAttrs` (`contentType`, `messageDigest`, `signingTime`, `signingCertificateV2`) and, for CAdES-T, adds the RFC 3161 token as an unsigned attribute (`signatureTimeStampToken`, OID `1.2.840.113549.1.9.16.2.14`).
+- **RFC 3161 TSA client (`notary/tsa.py`):**
+  - Computes `SHA-256(signatureValue)`, generates a cryptographically random `nonce`, requests `certReq = True`, and walks the configured TSAs in order until one returns a `granted` response whose `messageImprint` and `nonce` match.
+- **LTV evidence and multiple signatures (`notary/cades/ltv.py`, `notary/evidence.py`, `add_parallel_signature` in `builder.py`):**
+  - `sign --ltv` adds, after the timestamp, two unsigned attributes from ETSI EN 319 122-1: `certificateValues` (signer chain, `1.2.840.113549.1.9.16.2.23`) and `revocationValues` with the OCSP response (`...2.24`). The result is CAdES-LT. The chain comes from `--chain` or is downloaded from the certificate's AIA (`caIssuers`), and the OCSP response is validated before embedding it: if the evidence cannot be gathered, `sign` fails and writes nothing.
+  - `cosign` adds a second parallel `SignerInfo` to an existing `.csig`: each signer signs the document on their own and carries their own timestamp. Earlier signatures are preserved byte for byte.
+- **Verifier and OCSP client (`notary/verify.py`, `notary/ocsp.py`):**
+  - Takes the `.csig` apart and validates document integrity, signed attributes, the mathematical signature, the signer chain up to `--trust`, the RFC 3161 timestamp (imprint, the TSA's CMS signature, `ExtendedKeyUsage = timeStamping`, and the TSA chain up to `--trust`), certificate validity at the TSA time (or `--at`) and OCSP revocation status.
+
+---
+
+## 2. Design questions
+
+### Question 1: the two certificates in the DNIe
 > *The DNIe has two certificates. Which one must sign a document, and how does your program tell them apart without relying on their labels?*
 
-El DNIe contiene dos certificados de usuario final emitidos por la Dirección General de la Policía:
-1. **`CertFirmaDigital`** (certificado de firma electrónica reconocida/cualificada): es el que debe usarse para firmar documentos.
-2. **`CertAutenticacion`** (certificado de autenticación): destinado a autenticar al titular ante servidores o sesiones (por ejemplo, TLS cliente).
+The DNIe holds two end-entity certificates issued by the Spanish national police:
+1. **`CertFirmaDigital`** (qualified electronic signature certificate): the one to use for signing documents.
+2. **`CertAutenticacion`** (authentication certificate): meant to authenticate the holder to servers or sessions (for example TLS client authentication).
 
-`notary` los distingue inspeccionando la extensión estándar X.509 **`KeyUsage`** (OID `2.5.29.15`, RFC 5280) del certificado:
-- El certificado de firma declara el bit **`non_repudiation`** (denominado **`content_commitment`** en RFC 5280 y en `asn1crypto`/`cryptography`).
-- El certificado de autenticación declara el bit **`digital_signature`** sin `non_repudiation`/`content_commitment`.
+`notary` tells them apart by inspecting the standard X.509 **`KeyUsage`** extension (OID `2.5.29.15`, RFC 5280):
+- The signing certificate sets the **`non_repudiation`** bit (called **`content_commitment`** in RFC 5280 and in `asn1crypto`/`cryptography`).
+- The authentication certificate sets **`digital_signature`** without `non_repudiation`/`content_commitment`.
 
-La etiqueta PKCS#11 (`CKA_LABEL`) solo se utiliza como mecanismo de respaldo si un certificado externo careciera de `KeyUsage`. Una vez elegido el certificado de firma en sesión pública, se conserva su `CKA_ID` para localizar la clave privada asociada (`CKO_PRIVATE_KEY`) tras iniciar sesión con el PIN.
+The PKCS#11 label (`CKA_LABEL`) is only a fallback if some certificate lacks `KeyUsage`. Once the signing certificate is chosen in a public session, its `CKA_ID` is kept to find the matching private key (`CKO_PRIVATE_KEY`) after PIN login.
 
 ---
 
-### Pregunta 2: ¿Qué se envía a la TSA y por qué no el documento?
+### Question 2: what is sent to the TSA, and why not the document?
 > *What exactly do you send to the TSA? Why not the document? What would a token over the document prove, and what would it not prove?*
 
-En CAdES-T se envía a la TSA el **resumen criptográfico (SHA-256) del valor de la firma (`SignerInfo.signature`)**, nunca el resumen del documento original.
+In CAdES-T the TSA receives the **SHA-256 digest of the signature value (`SignerInfo.signature`)**, never the digest of the original document.
 
-- **Qué demostraría un sello sobre el documento:** únicamente que el archivo existía antes de la hora $T$ indicada por la TSA. **No demostraría** quién lo firmó ni cuándo se realizó la firma: un firmante cuya clave caducase o fuese revocada hoy podría tomar un documento sellado hace un año, firmarlo hoy con su clave ya caducada/revocada y adjuntar aquel sello antiguo fingiendo que la firma se hizo hace un año.
-- **Qué demuestra el sello sobre `signatureValue`:** como `signatureValue` depende criptográficamente de la clave privada del firmante y de `signedAttrs` (que a su vez contiene el `messageDigest` del documento y el hash del certificado en `signingCertificateV2`), sellar `SHA-256(signatureValue)` demuestra que **esa firma concreta sobre ese documento ya se había calculado no más tarde del instante $T$**.
+- **What a token over the document would prove:** only that the file existed before the TSA time $T$. It would **not** prove who signed it or when the signature was made: a signer whose key expired or was revoked today could take a document stamped a year ago, sign it today with the expired/revoked key, and attach the old stamp pretending the signature is a year old.
+- **What a token over `signatureValue` proves:** `signatureValue` depends cryptographically on the signer's private key and on `signedAttrs` (which contain the document's `messageDigest` and the certificate hash in `signingCertificateV2`). Stamping `SHA-256(signatureValue)` therefore proves that **that specific signature over that document had already been computed no later than $T$**.
 
 ---
 
-### Pregunta 3: ¿Qué bytes firma realmente la tarjeta?
+### Question 3: which bytes does the card actually sign?
 > *What bytes does the card actually sign? (Hint: it is not the document, and it is not exactly the DER encoding of the signed attributes as they appear in the file.)*
 
-El proceso consta de tres niveles:
-1. Primero se calcula el resumen `SHA-256` del documento y se coloca dentro del atributo firmado `messageDigest`.
-2. Dentro del archivo `.csig`, el campo `signedAttrs` de `SignerInfo` aparece codificado en DER con la etiqueta contextual implícita `[0]` (primer byte **`0xA0`**). Sin embargo, según RFC 5652 §5.4, para calcular o verificar la firma se debe sustituir esa etiqueta contextual `[0]` (`0xA0`) por la etiqueta universal **`SET OF` (`0x31`)**, manteniendo sus elementos ordenados canónicamente según DER. Se calcula el `SHA-256` (32 bytes) de esa codificación `SET OF`.
-3. Al invocar `C_Sign` en la tarjeta mediante el mecanismo PKCS#11 `CKM_RSA_PKCS`, la tarjeta no recibe el documento ni los 32 bytes desnudos del hash, sino la estructura ASN.1 DER **`DigestInfo`** de **51 bytes** (RFC 8017 §9.2), formada por los 19 bytes del `AlgorithmIdentifier` de SHA-256 (`30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20`) seguidos de los 32 bytes del resumen `SHA-256(SET OF signedAttrs)`. El chip aplica el relleno PKCS#1 v1.5 de tipo `01` y la exponenciación modular con la clave privada.
+There are three levels:
+1. The `SHA-256` digest of the document is computed and placed in the signed attribute `messageDigest`.
+2. Inside the `.csig` file, `signedAttrs` is DER-encoded with the implicit context tag `[0]` (first byte **`0xA0`**). However, per RFC 5652 §5.4, to compute or verify the signature that `[0]` tag (`0xA0`) must be replaced by the universal **`SET OF`** tag (**`0x31`**), keeping the elements in canonical DER order. The `SHA-256` (32 bytes) of that `SET OF` encoding is computed.
+3. When `C_Sign` is called on the card with the PKCS#11 mechanism `CKM_RSA_PKCS`, the card receives neither the document nor the bare 32-byte hash, but the 51-byte ASN.1 DER **`DigestInfo`** structure (RFC 8017 §9.2): the 19-byte SHA-256 `AlgorithmIdentifier` (`30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20`) followed by the 32-byte digest `SHA-256(SET OF signedAttrs)`. The chip applies PKCS#1 v1.5 type `01` padding and the modular exponentiation with the private key.
 
 ---
 
-### Pregunta 4: ¿Por qué se incluye `signingCertificateV2` y qué ataque previene?
+### Question 4: why is `signingCertificateV2` there, and what attack does it prevent?
 > *Why is `signingCertificateV2` there? What attack does it prevent?*
 
-En CMS clásico (RFC 5652), la firma cubre `signedAttrs`, pero el certificado del firmante (`SignedData.certificates`) y su referencia en `SignerInfo.sid` quedan **fuera** de los bytes firmados.
+In classic CMS (RFC 5652) the signature covers `signedAttrs`, but the signer's certificate (`SignedData.certificates`) and its reference in `SignerInfo.sid` are **outside** the signed bytes.
 
-Sin `signingCertificateV2` (RFC 5035), un atacante o una CA maliciosa podría emitir un segundo certificado con **la misma clave pública** pero con otra identidad (otro `Subject`), otra política o distintos usos de clave, y sustituir el certificado dentro del `.csig`. La firma matemática RSA seguiría verificando con la clave pública. Al incluir el hash SHA-256 de los bytes DER completos del certificado dentro de `signingCertificateV2` en `signedAttrs`, el certificado exacto queda protegido por la firma y cualquier sustitución invalida la verificación.
+Without `signingCertificateV2` (RFC 5035), an attacker or a malicious CA could issue a second certificate with **the same public key** but another identity (`Subject`), policy or key usage, and swap it into the `.csig`. The RSA signature would still verify against the public key. By including the SHA-256 hash of the certificate's full DER bytes in `signingCertificateV2` inside `signedAttrs`, the exact certificate is protected by the signature and any substitution breaks verification.
 
 ---
 
-### Pregunta 5: ¿Se puede confiar en los certificados incluidos en el `.csig`?
+### Question 5: can the certificates inside the `.csig` be trusted?
 > *The signature file contains certificates. Can your verifier trust them? Where does trust come from?*
 
-**No.** Cualquier atacante puede generar su propia CA autofirmada, emitir un certificado a nombre de otra persona, firmar un documento e incluir toda esa cadena dentro de `SignedData.certificates`.
+**No.** Anyone can create their own self-signed CA, issue a certificate in someone else's name, sign a document and put the whole chain in `SignedData.certificates`.
 
-La confianza nunca proviene del archivo `.csig`, sino de los **anclas de confianza (*Trust Anchors*)** que el verificador configura explícitamente fuera de banda mediante `--trust` (por ejemplo, `AC RAIZ DNIE 2` de la Policía Nacional y el certificado raíz de la TSA). Los certificados incluidos dentro del `.csig` sirven únicamente como eslabones auxiliares para construir el camino criptográfico desde el certificado hoja hasta un ancla de `--trust`. Si la cadena del firmante o de la TSA no termina en un certificado presente en `--trust`, el verificador nunca devuelve `VALID`, sino `INDETERMINATE`.
+Trust never comes from the `.csig`, but from the **trust anchors** the verifier is explicitly given out of band with `--trust` (for example the Spanish police's `AC RAIZ DNIE 2` and the TSA's root certificate). Certificates inside the `.csig` serve only as auxiliary links to build the path from the leaf certificate to an anchor in `--trust`. If the signer or TSA chain does not end in a certificate present in `--trust`, the verifier never returns `VALID`, only `INDETERMINATE`.
 
 ---
 
-### Pregunta 6: Discrepancia entre la hora de la TSA y `signingTime`
+### Question 6: TSA time versus `signingTime`
 > *The TSA says 10:42 and `signingTime` says 11:42. Which one wins, and why might they differ by one hour, or by three years?*
 
-Gana siempre la **hora de la TSA (`genTime`)**:
-- `signingTime` lo escribe el ordenador del firmante usando su propio reloj local. El firmante tiene control total sobre ese reloj (puede estar mal configurado o ser manipulado deliberadamente).
-- Una diferencia de **una hora** (p. ej., `10:42 UTC` frente a `11:42`) suele deberse a una confusión de huso horario local (CET `UTC+1` en invierno en España) o al horario de verano (CEST) en un reloj mal sincronizado.
-- Una diferencia de **tres años** puede deberse a una pila CMOS agotada, un reloj de sistema desajustado o un intento deliberado de antedatar (`backdating`) o posdatar la declaración de firma. Por ello, `notary verify` evalúa la vigencia de los certificados exclusivamente en la hora de la TSA (o en `--at`), y muestra `signingTime` únicamente como fecha declarada por el firmante.
+The **TSA time (`genTime`)** always wins:
+- `signingTime` is written by the signer's computer using its local clock, which the signer fully controls (it may be misconfigured or deliberately altered).
+- A difference of **one hour** (e.g. `10:42 UTC` versus `11:42`) usually comes from a time-zone mix-up (CET `UTC+1` in winter in Spain) or daylight saving time (CEST) on a poorly synchronised clock.
+- A difference of **three years** can come from a dead CMOS battery, a misadjusted system clock, or a deliberate attempt to backdate or postdate the signing claim. So `notary verify` evaluates certificate validity exclusively at the TSA time (or `--at`) and shows `signingTime` only as the date claimed by the signer.
 
 ---
 
-### Pregunta 7: Certificado revocado hoy frente a una firma del mes pasado
+### Question 7: a certificate revoked today versus a signature from last month
 > *A certificate is revoked today. Was a signature made last month valid? What information would you need to answer, and does OCSP give it to you?*
 
-Para responder si una firma realizada el mes pasado era válida cuando el certificado figura revocado hoy, necesitamos saber:
-1. **Cuándo se realizó realmente la firma:** acreditado por el sello de tiempo (`genTime`) de una TSA de confianza.
-2. **Cuándo se produjo la revocación (`revocationTime`) y por qué motivo (`revocationReason`):** es decir, si la revocación fue posterior al sello de tiempo y si la clave ya estaba comprometida antes.
+To decide whether a signature made last month was valid when the certificate shows as revoked today, we need to know:
+1. **When the signature was really made:** proven by the timestamp (`genTime`) of a trusted TSA.
+2. **When the revocation happened (`revocationTime`) and why (`revocationReason`):** that is, whether the revocation came after the timestamp and whether the key was already compromised before.
 
-¿Nos da OCSP (RFC 6960) esta información?
-- Cuando el estado devuelto en un `SingleResponse` OCSP es `revoked`, la estructura `RevokedInfo` incluye obligatoriamente el campo **`revocationTime`** (y opcionalmente `revocationReason`).
-- Si `revocationTime` es **anterior o igual** a la hora de la TSA, la firma es con certeza **`INVALID`**, porque el certificado ya estaba revocado cuando se selló.
-- Sin embargo, una consulta OCSP hecha hoy tiene limitaciones para validar firmas históricas:
-  1. Si el certificado caducó hace tiempo, muchos responders OCSP dejan de mantener su estado o responden `unknown`.
-  2. La fecha `revocationTime` refleja cuándo se notificó/registró la revocación ante la CA, pero si el usuario perdió la tarjeta días antes de denunciarlo, la clave pudo usarse en ese intervalo.
-  3. Si `revocationTime` es **posterior** a la hora de evaluación (TSA o `--at`), `notary verify` mantiene la firma como válida: la firma ya existía, sellada, antes de la revocación. Sin sello de tiempo la hora de evaluación es la actual, de modo que cualquier revocación ya registrada invalida la prueba.
-  4. Por eso los perfiles longevos (CAdES-LT / CAdES-LTA) incrustan la respuesta OCSP obtenida en el momento de firmar (o poco después del sello TSA) dentro de la propia firma para poder verificarla años más tarde sin depender del estado actual del servidor OCSP.
+Does OCSP (RFC 6960) provide this?
+- When the status in an OCSP `SingleResponse` is `revoked`, the `RevokedInfo` structure mandatorily includes **`revocationTime`** (and optionally `revocationReason`).
+- If `revocationTime` is **earlier than or equal to** the TSA time, the signature is definitely **`INVALID`**, because the certificate was already revoked when it was stamped.
+- However, an OCSP query made today has limits when validating historical signatures:
+  1. If the certificate expired long ago, many OCSP responders stop maintaining its status or answer `unknown`.
+  2. `revocationTime` reflects when the revocation was reported/recorded at the CA; if the holder lost the card days before reporting it, the key could have been used in between.
+  3. If `revocationTime` is **later than** the evaluation time (TSA or `--at`), `notary verify` keeps the signature valid: the signature already existed, stamped, before the revocation. Without a timestamp the evaluation time is the current time, so any already recorded revocation invalidates the proof.
+  4. That is why long-term profiles (CAdES-LT / CAdES-LTA) embed the OCSP response obtained at signing time (or shortly after the TSA stamp) in the signature itself, so it can be verified years later without depending on the OCSP server's current state.
 
 ---
 
-### Pregunta 8 y Sección Especial (1/2 página): ¿Qué demuestra un sello de tiempo y qué no demuestra?
+### Question 8: what does a timestamp prove, and what does it not?
 > *What does your timestamp prove about the moment of signing? Could the signature have been made earlier? Could someone else have made it with your card?*
 
-#### Qué demuestra exactamente una firma CAdES-T
-Un sello de tiempo RFC 3161 emitido en el instante $T_{\text{TSA}}$ sobre el resumen `SHA-256(signatureValue)` establece una **cota temporal superior (*no más tarde de $T_{\text{TSA}}$*)**:
-1. **Existencia previa del documento y de la firma:** Demuestra matemáticamente que tanto el documento (`messageDigest`) como la firma realizada con la clave privada asociada al certificado (`signingCertificateV2`) ya existían antes de $T_{\text{TSA}}$. Nadie —ni siquiera el propio titular de la clave privada— puede crear hoy una firma y conseguir que una TSA honesta le estampe una fecha del mes pasado.
-2. **Orden causal entre creación, firma y sellado:** En toda prueba CAdES-T se cumple necesariamente que:
-   $$T_{\text{creación del documento}} \;\le\; T_{\text{firma en tarjeta}} \;\le\; T_{\text{TSA}}$$
-   En `notary sign`, al enviarse la petición a la TSA inmediatamente después de que la tarjeta genera `signatureValue` y con un `nonce` fresco de 64 bits, $T_{\text{firma}}$ y $T_{\text{TSA}}$ distan apenas unos segundos en condiciones normales.
+#### What a CAdES-T signature proves
+An RFC 3161 timestamp issued at $T_{\text{TSA}}$ over `SHA-256(signatureValue)` establishes an **upper time bound (*no later than $T_{\text{TSA}}$*)**:
+1. **Prior existence of the document and the signature:** it proves mathematically that both the document (`messageDigest`) and the signature made with the private key tied to the certificate (`signingCertificateV2`) existed before $T_{\text{TSA}}$. Nobody, not even the private-key holder, can create a signature today and get an honest TSA to stamp it with last month's date.
+2. **Causal order between creation, signing and stamping:** in every CAdES-T proof:
+   $$T_{\text{document creation}} \;\le\; T_{\text{card signature}} \;\le\; T_{\text{TSA}}$$
+   In `notary sign` the TSA request is sent immediately after the card produces `signatureValue`, with a fresh 64-bit `nonce`, so $T_{\text{signature}}$ and $T_{\text{TSA}}$ are normally only seconds apart.
 
-#### Qué NO demuestra un sello de tiempo
-1. **No establece una cota inferior (*cuánto antes se firmó*):** El sello RFC 3161 sobre `signatureValue` prueba que la firma no se hizo *después* de $T_{\text{TSA}}$, pero **la firma sí pudo haberse calculado horas, días o meses antes** de enviarse a la TSA. Un firmante podría firmar un documento en enero, guardar el `.csig` en privado y pedir el sello a la TSA en marzo; el sello solo probará que en marzo la firma ya existía, no que se firmase en marzo (para acotar también el límite inferior haría falta incluir antes de firmar un dato impredecible reciente, como un bloque o un primer sello previo dentro de los datos firmados).
-2. **No demuestra quién pulsó físicamente el teclado ni la ausencia de coacción:** La firma con el DNIe demuestra que intervino el chip físico del DNIe y que se introdujo su PIN correcto. No demuestra por sí sola que el titular no prestara su tarjeta y su PIN a un tercero, que un malware en el ordenador no modificase los bytes mostrados en pantalla antes de enviar el hash al lector (*what you see is not what you sign*), ni que el titular firmara libremente y sin coacción.
+#### What a timestamp does NOT prove
+1. **It sets no lower bound (*how long before it was signed*):** the RFC 3161 stamp over `signatureValue` proves the signature was not made *after* $T_{\text{TSA}}$, but **the signature may have been computed hours, days or months before** being sent to the TSA. A signer could sign in January, keep the `.csig` private, and request the stamp in March; the stamp only proves the signature already existed in March, not that it was made in March. (To also bound the lower limit, something unpredictable and recent, such as a block or a previous stamp, would have to be included in the signed data before signing.)
+2. **It does not prove who physically pressed the keys, nor the absence of coercion:** a DNIe signature proves the physical DNIe chip took part and its correct PIN was entered. By itself it does not prove the holder did not lend the card and PIN to someone else, that malware did not alter the bytes shown on screen before the hash was sent to the reader (*what you see is not what you sign*), or that the holder signed freely and without coercion.
 
 ---
 
-## 3. Reglas de Decisión del Verificador (`notary verify`)
+## 3. Verifier decision rules (`notary verify`)
 
-El comando `notary verify` ejecuta los 8 pasos en orden y emite uno de los tres veredictos posibles sin lanzar nunca excepciones no controladas:
+`notary verify` runs the 8 steps in order and returns one of three verdicts, never raising unhandled exceptions:
 
-| Veredicto | Código de salida | Condiciones que lo producen |
+| Verdict | Exit code | Conditions |
 | :--- | :---: | :--- |
-| **`VALID`** | `0` | 1. El contenedor `.csig` es CMS `SignedData` válido (`detached` o `attached`).<br>2. `messageDigest` coincide con el hash del documento.<br>3. `signingCertificateV2` (o `signingCertificate`) coincide con el certificado del firmante.<br>4. La firma matemática sobre `SET OF` (`0x31`) de `signedAttrs` es válida.<br>5. La cadena del firmante es criptográficamente válida hasta un ancla de `--trust`.<br>6. Si hay `signatureTimeStampToken`, su `messageImprint` es `Hash(signatureValue)`, su firma CMS y `ExtendedKeyUsage = timeStamping` son válidos, y la cadena de la TSA llega a un ancla de `--trust`. (Si no hay sello, se avisa explícitamente de que la única hora es una declaración).<br>7. Todos los certificados eran vigentes en la hora de la TSA (o en `--at`).<br>8. El estado OCSP es `GOOD` (o el certificado no declara URL OCSP en AIA). |
-| **`INVALID`** | `1` | Archivo vacío, truncado o corrupto; falta `--content` en una firma `detached`; el documento fue modificado (`messageDigest` distinto); `signingCertificateV2` no coincide; firma RSA/ECDSA inválida; un emisor de la cadena no es CA o su firma falla; el sello TSA cubre el documento en vez de la firma o pertenece a otra firma; algún certificado estaba caducado o aún no válido en la hora de evaluación; o OCSP devuelve `REVOKED` (o firma OCSP inválida). |
-| **`INDETERMINATE`** | `2` | La firma y los hashes son íntegros, pero falta información externa para confirmar la confianza o la vigencia: no se indicó `--trust`, la cadena del firmante o de la TSA no enlaza con ningún certificado de `--trust`, el servidor OCSP es inalcanzable por red o responde `UNKNOWN`. |
+| **`VALID`** | `0` | 1. The `.csig` is a valid CMS `SignedData` (`detached` or `attached`).<br>2. `messageDigest` matches the document hash.<br>3. `signingCertificateV2` (or `signingCertificate`) matches the signer certificate.<br>4. The mathematical signature over the `SET OF` (`0x31`) of `signedAttrs` is valid.<br>5. The signer chain is cryptographically valid up to a `--trust` anchor.<br>6. If there is a `signatureTimeStampToken`, its `messageImprint` is `Hash(signatureValue)`, its CMS signature and `ExtendedKeyUsage = timeStamping` are valid, and the TSA chain reaches a `--trust` anchor. (With no stamp, it explicitly warns that the only time is a claim.)<br>7. All certificates were valid at the TSA time (or `--at`).<br>8. The OCSP status is `GOOD` (or the certificate declares no OCSP URL in its AIA). |
+| **`INVALID`** | `1` | Empty, truncated or corrupt file; `--content` missing for a `detached` signature; document modified (different `messageDigest`); `signingCertificateV2` mismatch; invalid RSA/ECDSA signature; a chain issuer is not a CA or its signature fails; the TSA stamp covers the document instead of the signature, or belongs to another signature; a certificate was expired or not yet valid at the evaluation time; or OCSP returns `REVOKED` (or an invalid OCSP signature). |
+| **`INDETERMINATE`** | `2` | Signature and hashes are intact, but external information is missing to confirm trust or validity: no `--trust` was given, the signer or TSA chain does not link to any `--trust` certificate, the OCSP server is unreachable or answers `UNKNOWN`. |
 
 ---
 
-### Robustez ante archivos malformados
+### Robustness against malformed files
 
-`notary verify` nunca termina con una excepción: `asn1crypto` parsea de forma perezosa y un archivo corrupto puede fallar en cualquier punto de la verificación, no solo al cargarlo. `run_verify` envuelve todo el proceso y convierte cualquier excepción inesperada en `INVALID` con el motivo. Se comprueba con un test que muta bytes al azar (*fuzzing*) y exige siempre un veredicto. Los cambios en la lista informativa `digestAlgorithms` del contenedor CMS no alteran el veredicto, porque el verificador usa el algoritmo del `SignerInfo`, que sí está firmado.
+`notary verify` never ends with an exception: `asn1crypto` parses lazily, so a corrupt file can fail at any point of verification, not just on load. `run_verify` wraps the whole process and turns any unexpected exception into `INVALID` with the reason. A test that mutates random bytes (*fuzzing*) requires a verdict every time. Changes to the informational `digestAlgorithms` list of the CMS container do not alter the verdict, because the verifier uses the `SignerInfo` algorithm, which is signed.
 
-### PAdES: firma dentro de un PDF
+### PAdES: signing inside a PDF
 
-- **Estructura.** `sign --format pades` no reescribe el PDF: añade una *actualización incremental* con (1) el diccionario de firma (`/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /ETSI.CAdES.detached`, `/ByteRange`, `/Contents`, `/M`), (2) un campo de firma invisible (`/FT /Sig`, widget con `/Rect [0 0 0 0]`), (3) el catálogo y la página modificados (`/AcroForm`, `/Annots`) y (4) una tabla de referencias nueva que apunta a la anterior con `/Prev`. Si el PDF original usa *xref stream*, la nueva sección también (un PDF con tabla clásica recibe tabla clásica). Las firmas anteriores siguen verificando porque sus bytes no cambian.
-- **Qué firma la tarjeta.** El valor `/Contents` se reserva con ceros (20 000 bytes) y `/ByteRange [0 a b c]` se rellena con la posición real tras construir el archivo. El CMS es el mismo CAdES detached de siempre, calculado sobre los bytes del PDF fuera del hueco, con el sello RFC 3161 sobre el valor de firma. Dentro del CMS **no hay `signingTime`**: en PAdES la fecha declarada es `/M` (ETSI EN 319 142-1). Si el CMS no cabe en la reserva, `sign` falla en lugar de truncarlo.
-- **Verificación.** `verify` detecta el PDF por su cabecera, localiza cada `/ByteRange` y exige: que empiece en 0; que el hueco sea exactamente el valor hexadecimal que sigue a `/Contents` (así no se puede apuntar el rango a otro sitio, ataque de *signature wrapping*); y que, tras la **última** firma, no quede ningún byte sin cubrir. Una firma intermedia puede no llegar al final del archivo solo porque otra posterior la cubre. Después aplica a cada firma los mismos pasos que a un `.csig` (resumen, firma, cadena, sello, vigencia, OCSP). Se aceptan también `adbe.pkcs7.detached` (lo que genera Acrobat por defecto), sin `signingCertificateV2`, avisando de que entonces no se puede comprobar ese vínculo.
-- **Decisión: bytes añadidos tras la firma = `INVALID`.** Un validador completo (por ejemplo pyHanko) distingue qué cambios posteriores están permitidos (relleno de formularios, nuevas firmas) según los permisos del documento (DocMDP). Aquí no se analizan, así que cualquier contenido no cubierto se rechaza: es la postura conservadora, a costa de rechazar PDF que otro validador aceptaría para su revisión original.
-- **Contraste independiente.** Se firmó un PDF con `notary` y se validó con pyHanko (fuera del programa, solo para comprobar): firma íntegra, válida y de confianza, con cobertura de todo el archivo, para PDF clásicos, con *xref stream* y con catálogo y páginas dentro de *object streams*; y con doble firma. En el sentido inverso, `notary verify` acepta un PAdES firmado por pyHanko. Un byte cambiado en el contenido lo detectan los dos.
-- **Biblioteca.** Se usa `pypdf` solo para *leer* el catálogo, la página y el trailer (el guion permite una biblioteca para la estructura del PDF, no para firmar). Escribir la actualización incremental, el `/ByteRange`, la firma, el sello y la verificación es código propio.
+- **Structure.** `sign --format pades` does not rewrite the PDF: it appends an *incremental update* with (1) the signature dictionary (`/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /ETSI.CAdES.detached`, `/ByteRange`, `/Contents`, `/M`), (2) an invisible signature field (`/FT /Sig`, widget with `/Rect [0 0 0 0]`), (3) the modified catalog and page (`/AcroForm`, `/Annots`) and (4) a new cross-reference table pointing to the previous one with `/Prev`. If the original PDF uses an *xref stream*, the new section does too (a classic-table PDF gets a classic table). Earlier signatures keep verifying because their bytes do not change.
+- **What the card signs.** The `/Contents` value is reserved with zeros (20,000 bytes) and `/ByteRange [0 a b c]` is filled with the real positions after the file is built. The CMS is the usual CAdES detached, computed over the PDF bytes outside the gap, with the RFC 3161 stamp over the signature value. The CMS has **no `signingTime`**: in PAdES the claimed date is `/M` (ETSI EN 319 142-1). If the CMS does not fit in the reserved space, `sign` fails instead of truncating it.
+- **Verification.** `verify` detects the PDF by its header, locates each `/ByteRange` and requires: that it starts at 0; that the gap is exactly the hexadecimal value following `/Contents` (so the range cannot be pointed elsewhere, a *signature wrapping* attack); and that, after the **last** signature, no byte is left uncovered. An intermediate signature may stop short of the end of the file only because a later one covers it. It then applies to each signature the same steps as for a `.csig` (digest, signature, chain, stamp, validity, OCSP). `adbe.pkcs7.detached` (what Acrobat produces by default) is also accepted, without `signingCertificateV2`, warning that this link cannot then be checked.
+- **Decision: bytes appended after the signature = `INVALID`.** A full validator (e.g. pyHanko) distinguishes which later changes are allowed (form filling, new signatures) according to the document permissions (DocMDP). Here they are not analysed, so any uncovered content is rejected: a conservative stance, at the cost of rejecting PDFs that another validator would accept for their original revision.
+- **Independent cross-check.** A PDF signed with `notary` was validated with pyHanko (outside the program, only as a check): intact, valid and trusted signature covering the whole file, for classic PDFs, xref-stream PDFs, PDFs with catalog and pages inside object streams, and with a double signature. In the opposite direction, `notary verify` accepts a PAdES signed by pyHanko. Both detect one changed byte in the content.
+- **Library.** `pypdf` is used only to *read* the catalog, page and trailer (a library for PDF structure, not for signing). Writing the incremental update, the `/ByteRange`, the signature, the stamp and the verification is our own code.
 
-### Protección del PIN: el contador de intentos no se puede consultar
+### PIN protection: the attempt counter cannot be queried
 
-- **Problema.** El DNIe permite 3 PIN incorrectos seguidos antes de bloquearse, y el guion (§4.4) exige no gastar el último. La comprobación obvia es el flag PKCS#11 `CKF_USER_PIN_FINAL_TRY`, pero **con este DNIe no es fiable**: OpenSC 0.27.1 (`card-dnie.c`) no soporta la consulta de estado del PIN (`SC_PIN_CMD_GET_INFO` devuelve `NOT_SUPPORTED`) y la tarjeta solo informa de los intentos restantes (`SW 63Cx`) como respuesta a un PIN **incorrecto**. Por eso, en una sesión nueva el flag aparece inactivo aunque ya se hayan gastado intentos. Se observó con una tarjeta real: tras dos PIN erróneos, `notary info` seguía mostrando `USER_PIN_FINAL_TRY` inactivo.
-- **Por qué no se pregunta a la tarjeta.** Un `VERIFY` sin datos es la consulta estándar de ISO 7816-4, pero el DNIe exige un canal seguro cifrado (CWA) para cualquier comando; improvisarlo contra una tarjeta con pocos intentos restantes sería peor que el problema.
-- **Solución: contador local (`notary/pin_guard.py`).** `PKCS11Signer` registra cada `CKR_PIN_INCORRECT` y, tras 2 fallos seguidos, se niega a pedir el PIN (deja un intento de margen). Un PIN correcto reinicia la cuenta; `CKR_PIN_LOCKED` la fija en 3. Solo se guarda el número de fallos por tarjeta, identificada por un hash de su número de serie, **nunca el PIN**. Si el fichero de estado no se puede leer, se rechaza en lugar de suponer 0. El comando `notary pin-guard` muestra el contador y permite fijarlo (`--set N`) o reiniciarlo (`--reset`) sin pedir el PIN.
-- **Limitación.** Solo cuenta los intentos hechos con `notary`: los de AutoFirma, un navegador u otro programa no los ve, y si se cambia el PIN en un PAD hay que reiniciarlo a mano. Es una red de seguridad, no una garantía.
+- **Problem.** The DNIe allows 3 consecutive wrong PINs before locking, and the last one must not be wasted. The obvious check is the PKCS#11 flag `CKF_USER_PIN_FINAL_TRY`, but **with this DNIe it is unreliable**: OpenSC 0.27.1 (`card-dnie.c`) does not support the PIN status query (`SC_PIN_CMD_GET_INFO` returns `NOT_SUPPORTED`) and the card only reports remaining attempts (`SW 63Cx`) in response to a **wrong** PIN. So in a new session the flag shows inactive even if attempts have been spent. This was observed with a real card: after two wrong PINs, `notary info` still showed `USER_PIN_FINAL_TRY` inactive.
+- **Why the card is not asked.** A `VERIFY` with no data is the standard ISO 7816-4 query, but the DNIe requires an encrypted secure channel (CWA) for any command; improvising one against a card with few attempts left would be worse than the problem.
+- **Solution: a local counter (`notary/pin_guard.py`).** `PKCS11Signer` records every `CKR_PIN_INCORRECT` and, after 2 failures in a row, refuses to ask for the PIN (leaving one attempt of margin). A correct PIN resets the count; `CKR_PIN_LOCKED` sets it to 3. Only the number of failures is stored per card, identified by a hash of its serial number, **never the PIN**. If the state file cannot be read, it refuses instead of assuming 0. The `notary pin-guard` command shows the counter and lets you set it (`--set N`) or reset it (`--reset`) without asking for the PIN.
+- **Limitation.** It only counts attempts made with `notary`: those from AutoFirma, a browser or other programs are invisible to it, and if the PIN is changed at a PIN unlock kiosk it must be reset by hand. It is a safety net, not a guarantee.
 
-### Evidencia incrustada (LTV) y varias firmas
+### Embedded evidence (LTV) and multiple signatures
 
-- **Respuesta OCSP incrustada:** si la firma lleva sello de tiempo y una respuesta OCSP para el certificado del firmante, `verify` la usa **sin red**. Se valida igual que una respuesta en vivo (firma del emisor o de un responder delegado con EKU `OCSPSigning`, `CertID`, estado) y además debe haberse **producido después del sello de tiempo**: una respuesta anterior solo dice que el certificado estaba bien *antes* y no descarta una revocación entre medias, así que el veredicto es `INDETERMINATE`. Una respuesta incrustada que dice `revoked` con `revocationTime` anterior a la hora de evaluación da `INVALID`. Sin evidencia incrustada, `verify` consulta OCSP en vivo como antes. Los certificados de `certificateValues` sirven para completar la cadena; la confianza sigue viniendo solo de `--trust`.
-- **Frescura de la respuesta en vivo:** la petición lleva un nonce aleatorio de 16 bytes; si la respuesta trae otro nonce es `INVALID`, y si no trae ninguno se acepta (muchos responders no lo soportan, p. ej. se desconoce si el del DNIe lo hace). Además, la hora actual debe caer dentro de `thisUpdate`–`nextUpdate` (margen de 5 minutos); una respuesta caducada o del futuro es `INDETERMINATE`. Sin `nextUpdate` se exige que tenga menos de 24 horas.
-- **Varias firmas:** si el archivo tiene más de un `SignerInfo`, `verify` los comprueba uno a uno y muestra cada desglose. El veredicto final es el peor de todos (`INVALID` > `INDETERMINATE` > `VALID`), de modo que una sola firma defectuosa invalida el conjunto. El orden en que se muestran lo fija la codificación DER (`SET OF` se ordena por bytes), no el orden en que se firmó.
-- **CA emisoras:** además de `BasicConstraints CA=TRUE`, si el certificado declara `KeyUsage` debe incluir `keyCertSign`.
+- **Embedded OCSP response:** if the signature carries a timestamp and an OCSP response for the signer certificate, `verify` uses it **offline**. It is validated like a live response (signature by the issuer or by a delegated responder with EKU `OCSPSigning`, `CertID`, status) and must also have been **produced after the timestamp**: an earlier response only says the certificate was fine *before* and does not rule out a revocation in between, so the verdict is `INDETERMINATE`. An embedded response saying `revoked` with `revocationTime` before the evaluation time gives `INVALID`. Without embedded evidence, `verify` queries OCSP live as before. The certificates in `certificateValues` help complete the chain; trust still comes only from `--trust`.
+- **Freshness of the live response:** the request carries a random 16-byte nonce; if the response has a different nonce it is `INVALID`, and if it has none it is accepted (many responders do not support it; it is unknown whether the DNIe's does). The current time must also fall within `thisUpdate`–`nextUpdate` (5-minute margin); an expired or future response is `INDETERMINATE`. Without `nextUpdate`, it must be under 24 hours old.
+- **Multiple signatures:** if the file has more than one `SignerInfo`, `verify` checks them one by one and shows each breakdown. The final verdict is the worst of all (`INVALID` > `INDETERMINATE` > `VALID`), so a single bad signature invalidates the set. The display order is set by the DER encoding (`SET OF` is sorted by bytes), not by signing order.
+- **Issuing CAs:** besides `BasicConstraints CA=TRUE`, if the certificate declares `KeyUsage` it must include `keyCertSign`.
 
-## 4. Limitaciones Conocidas
+## 4. Known limitations
 
-1. **CAdES-LT, no CAdES-LTA:** con `--ltv` se incrustan la cadena y la respuesta OCSP del firmante, pero no se incrustan los de la TSA (su cadena ya viaja en el token con `certReq`) ni se añaden sellos de archivo (`archiveTimeStamp`). Si el certificado de la TSA caduca sin resellar, la prueba deja de poder verificarse en el futuro; haría falta CAdES-LTA.
-2. **Contrafirmas anidadas:** `cosign` añade firmas en paralelo, no contrafirmas (`countersignature`).
-3. **PAdES básico:** la firma es invisible (sin aspecto sobre la página); no hay PAdES-LT/LTA (no se escribe el diccionario `/DSS` con la cadena y el OCSP, por eso `--format pades` no admite `--ltv`); no se admiten PDF cifrados; la firma se coloca en la primera página; no se analizan los permisos DocMDP, así que cualquier modificación posterior a la última firma se rechaza.
-4. **Nonce OCSP no obligatorio:** si el servidor no devuelve el nonce, la protección frente a repeticiones se reduce a la ventana `thisUpdate`/`nextUpdate`.
-5. **DNIe Remote no consigue firmar:** el móvil como lector (`DNIeRemotePKCS11.dll`) lee los certificados, pero la firma falla en el paso del PIN. Se probó en dos equipos. En el primero el programa se quedó parado en `C_Login` hasta cortarlo con Ctrl+C. En el segundo (3-nov-2026, con el DNIe vinculado por USB) `C_Login` devolvió `Unknown error (0x000000E9)`, que no es un código estándar de PKCS#11, y la app del móvil mostró «the operation cannot be successfully finished». Allí `PROTECTED_AUTHENTICATION_PATH` salía inactivo, así que `notary` pedía el PIN por consola. No sabemos si el PIN llegó a la tarjeta ni por qué falla el módulo. Con el lector USB y OpenSC todo funciona. `PKCS11Signer` respeta ahora `CKF_PROTECTED_AUTHENTICATION_PATH` (llama a `C_Login` con NULL y no pide el PIN por consola) y cuenta como intento gastado un `login` interrumpido con Ctrl+C, pero no sabemos si esa era la causa del bloqueo. El contador de PIN solo cuenta `CKR_PIN_INCORRECT`, y no sabemos qué código devuelve ese módulo con un PIN erróneo, así que con el móvil podría contar menos intentos de los gastados. Con un único módulo instalado, `find_pkcs11_module` lo devuelve sin sondearlo (cargar el módulo dos veces rompe la comunicación de DNIe Remote), de modo que la ausencia de tarjeta se detecta después, al listar las ranuras.
-6. **Verificación de estado OCSP del firmante:** Se consulta por OCSP el certificado del firmante extrayendo la URL de su extensión AIA (`AuthorityInformationAccess`); para las raíces de confianza (`--trust`) la confianza es directa por configuración del usuario.
-
+1. **CAdES-LT, not CAdES-LTA:** with `--ltv` the signer's chain and OCSP response are embedded, but not the TSA's (its chain already travels in the token with `certReq`), and no archive timestamps (`archiveTimeStamp`) are added. If the TSA certificate expires without re-stamping, the proof can no longer be verified in the future; CAdES-LTA would be needed.
+2. **Nested countersignatures:** `cosign` adds parallel signatures, not countersignatures (`countersignature`).
+3. **Basic PAdES:** the signature is invisible (no appearance on the page); there is no PAdES-LT/LTA (the `/DSS` dictionary with chain and OCSP is not written, which is why `--format pades` does not accept `--ltv`); encrypted PDFs are not supported; the signature is placed on the first page; DocMDP permissions are not analysed, so any modification after the last signature is rejected.
+4. **OCSP nonce not mandatory:** if the server does not return the nonce, replay protection is reduced to the `thisUpdate`/`nextUpdate` window.
+5. **DNIe Remote cannot sign:** the phone as a reader (`DNIeRemotePKCS11.dll`) reads the certificates, but signing fails at the PIN step. It was tried on two machines. On the first the program hung in `C_Login` until stopped with Ctrl+C. On the second (3 Nov 2026, DNIe paired over USB) `C_Login` returned `Unknown error (0x000000E9)`, which is not a standard PKCS#11 code, and the phone app showed "the operation cannot be successfully finished". There `PROTECTED_AUTHENTICATION_PATH` showed inactive, so `notary` asked for the PIN on the console. We do not know whether the PIN reached the card or why the module fails. With the USB reader and OpenSC everything works. `PKCS11Signer` now honours `CKF_PROTECTED_AUTHENTICATION_PATH` (calls `C_Login` with NULL and does not ask for the PIN on the console) and counts an interrupted `login` (Ctrl+C) as a spent attempt, but we do not know if that was the cause of the hang. The PIN counter only counts `CKR_PIN_INCORRECT`, and we do not know what code this module returns for a wrong PIN, so with the phone it may count fewer attempts than were spent. With a single module installed, `find_pkcs11_module` returns it without probing it (loading the module twice breaks DNIe Remote's communication), so the absence of a card is detected later, when listing slots.
+6. **Signer OCSP status check:** the signer certificate is queried over OCSP, taking the URL from its AIA extension (`AuthorityInformationAccess`); for the trust roots (`--trust`) trust is direct, by user configuration.

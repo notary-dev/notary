@@ -7,8 +7,8 @@ tabla de referencias cruzadas. La firma cubre todo el archivo excepto el valor
 ``/Contents`` (``/ByteRange``).
 
 Solo se usa ``pypdf`` para *leer* la estructura del PDF; la firma, el sello de
-tiempo y la verificación son código propio (el guion no permite bibliotecas que
-firmen).
+tiempo y la verificación son código propio (sin bibliotecas de firma
+de PDF).
 """
 
 import io

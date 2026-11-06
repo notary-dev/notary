@@ -1,4 +1,4 @@
-"""Generador de pruebas válidas y defectuosas (Pair Exchange) para Notary."""
+"""Generador de pruebas válidas y defectuosas (lote de pruebas conocidas) para Notary."""
 
 import argparse
 import json
@@ -254,7 +254,7 @@ def generate_pair_exchange_set(
     second_valid_proof_bytes: Optional[bytes] = None,
     second_valid_content_bytes: Optional[bytes] = None,
 ) -> List[Dict[str, str]]:
-    """Genera las 6 pruebas del Pair Exchange (2 válidas y 4 defectuosas) y su Answer Key.
+    """Genera las 6 pruebas del lote de pruebas (2 válidas y 4 defectuosas) y su Answer Key.
 
     A partir de una prueba real ``base_proof_bytes`` (por ejemplo, firmada con el DNIe y
     una TSA pública), construye las 6 pruebas sin necesidad de volver a introducir el PIN:
@@ -416,7 +416,7 @@ def generate_pair_exchange_set(
         json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     md_lines = [
-        "# Clave de Respuestas (Answer Key) — Pair Exchange",
+        "# Clave de Respuestas (Answer Key)",
         "",
         "| Prueba | Archivo `.csig` | Contenido | Veredicto esperado | Defecto / Descripción |",
         "| :--- | :--- | :--- | :--- | :--- |",
@@ -436,7 +436,7 @@ def generate_pair_exchange_set(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Genera las 6 pruebas del Pair Exchange (2 válidas y 4 defectuosas) y su Answer Key."
+        description="Genera las 6 pruebas del lote de pruebas (2 válidas y 4 defectuosas) y su Answer Key."
     )
     parser.add_argument(
         "--base-proof",
@@ -533,7 +533,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         signer = SoftwareSigner(
             str(certs_dir / "signer.key"), str(certs_dir / "signer.crt")
         )
-        base_content = b"Documento oficial de intercambio entre parejas (Notary A1)."
+        base_content = b"Documento oficial de prueba de Notary."
         base_proof = build_cades_bes(
             base_content,
             signer,
