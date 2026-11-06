@@ -225,9 +225,3 @@ __marimo__/
 
 Thumbs.db
 
-# Presentacion y guion de la defensa (viven fuera del repo)
-/docs/defensa/
-/docs/presentacion_a1_notary.pdf
-
-# Ajustes locales del editor
-/.vscode/
