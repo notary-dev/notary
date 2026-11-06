@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notary"
+version = "0.1.0"
+description = "Firma CAdES-T con DNIe y sellos de tiempo RFC 3161, y verificación de pruebas."
+requires-python = ">=3.12"
+dependencies = [
+    "PyKCS11",
+    "asn1crypto",
+    "cryptography",
+    "pypdf",
+    "requests",
+]
+
+[project.scripts]
+notary = "notary.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["notary*"]

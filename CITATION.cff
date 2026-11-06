@@ -1,0 +1,11 @@
+﻿cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "notary"
+type: software
+authors:
+  - family-names: "Pola"
+    given-names: "Nacho"
+    alias: "NachoPola16"
+  - family-names: "Longares Gil"
+    given-names: "Martín"
+    alias: "martin05mlg"
