@@ -9,6 +9,7 @@ Command-line tool that inspects the Spanish national eID (DNIe, `info`), signs d
 > **Documentation:**
 > - **Authors:** Nacho Pola ([@NachoPola16](https://github.com/NachoPola16)) · Martín Longares Gil ([@martin05mlg](https://github.com/martin05mlg)), equal contribution.
 > - **Design document and "What a timestamp proves":** [docs/DESIGN.md](docs/DESIGN.md)
+> - **Roadmap:** [ROADMAP.md](ROADMAP.md)
 > - **Testing with a real DNIe:** [docs/PRUEBAS_DNIE.md](docs/PRUEBAS_DNIE.md) is a step-by-step guide (setup, every command with its expected result, cases that must fail).
 >
 > The design and testing documents, and the CLI messages (for example `VEREDICTO: VALID`), are currently in Spanish.
